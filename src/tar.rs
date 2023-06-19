@@ -9,7 +9,7 @@ crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
 async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
     debug!("opening tar file {}", path.display());
-    let mut archive = tokio_tar_up2date::Archive::new(tokio::fs::File::open(path).await?);
+    let mut archive = tokio_tar_up2date::Archive::new(crate::util::async_file(path).await?);
     let out = MemFloppyDisk::new();
 
     let mut entries = archive.entries()?;

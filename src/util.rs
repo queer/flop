@@ -18,7 +18,7 @@ macro_rules! archive_format {
             }
 
             impl [< $format FloppyDisk >] {
-                pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<impl FloppyDisk<'a>> {
+                pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<impl FloppyDisk<'a> + FloppyDiskUnixExt> {
                     let path = path.as_ref();
                     $open(path).await.map(|delegate| Self { delegate, path: path.to_path_buf() })
                 }
@@ -540,6 +540,27 @@ macro_rules! archive_format {
             }
         }
     };
+}
+
+pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
+    let path = path.as_ref();
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    file.sync_all()?;
+    Ok(file)
+}
+
+pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio::fs::File> {
+    let path = path.as_ref();
+    let file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .await?;
+    file.sync_all().await?;
+    Ok(file)
 }
 
 use std::future::Future;

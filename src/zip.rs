@@ -12,7 +12,7 @@ crate::util::archive_format!(Zip, "a.zip", zip_open, zip_close);
 async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
     debug!("opening zip file {}", path.display());
-    let mut archive = ZipFileReader::with_tokio(tokio::fs::File::open(path).await?)
+    let mut archive = ZipFileReader::with_tokio(crate::util::async_file(path).await?)
         .await
         .map_err(fix_err)?;
     let out = MemFloppyDisk::new();
