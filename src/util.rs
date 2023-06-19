@@ -543,7 +543,7 @@ macro_rules! archive_format {
 }
 
 pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
-    let path = path.as_ref();
+    let path = path.as_ref().canonicalize()?;
     let file = if path.exists() {
         std::fs::OpenOptions::new().write(true).open(path)?
     } else {
@@ -558,8 +558,12 @@ pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::Fil
 
 pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio::fs::File> {
     let path = path.as_ref();
-    let file = if tokio::fs::try_exists(path).await? {
-        tokio::fs::OpenOptions::new().write(true).open(path).await?
+    let path = tokio::fs::canonicalize(path).await?;
+    let file = if tokio::fs::try_exists(&path).await? {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await?
     } else {
         tokio::fs::OpenOptions::new()
             .create_new(true)
