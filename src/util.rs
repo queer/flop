@@ -544,21 +544,29 @@ macro_rules! archive_format {
 
 pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
     let path = path.as_ref();
-    let file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)?;
+    let file = if path.exists() {
+        std::fs::OpenOptions::new().write(true).open(path)?
+    } else {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)?
+    };
     file.sync_all()?;
     Ok(file)
 }
 
 pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio::fs::File> {
     let path = path.as_ref();
-    let file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .await?;
+    let file = if tokio::fs::try_exists(path).await? {
+        tokio::fs::OpenOptions::new().write(true).open(path).await?
+    } else {
+        tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .await?
+    };
     file.sync_all().await?;
     Ok(file)
 }
