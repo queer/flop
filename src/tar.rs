@@ -119,7 +119,7 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
             archive.append(&header, empty).await?;
         } else if kind == EntryType::Symlink {
             let link = disk.read_link(&path).await?;
-            warn!("creating symlink: {} -> {}", path.display(), link.display());
+            debug!("creating symlink: {} -> {}", path.display(), link.display());
 
             header.set_entry_type(EntryType::Symlink);
             header.set_link_name(link.to_str().unwrap())?;
