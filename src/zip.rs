@@ -11,6 +11,11 @@ crate::util::archive_format!(Zip, "a.zip", zip_open, zip_close);
 
 async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
+    if !crate::util::exists_async(path.clone()).await {
+        let _archive = ZipFileWriter::with_tokio(tokio::fs::File::create(path).await?);
+        return Ok(MemFloppyDisk::new());
+    }
+
     debug!("opening zip file {}", path.display());
     let mut archive = ZipFileReader::with_tokio(crate::util::async_file(path).await?)
         .await

@@ -1,37 +1,73 @@
 use std::os::unix::prelude::OsStringExt;
 
 use futures::TryStreamExt;
+use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tracing::debug;
+use tokio_tar_up2date::EntryType;
+use tracing::{debug, warn};
 
 crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
 
 async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
+    debug!("considering {}..", path.display());
+    if !crate::util::exists_async(path.clone()).await {
+        debug!("nah, just empty tar: {}", path.display());
+        let _archive = tokio_tar_up2date::Builder::new(File::create(path).await?);
+        return Ok(MemFloppyDisk::new());
+    }
+
     debug!("opening tar file {}", path.display());
     let mut archive = tokio_tar_up2date::Archive::new(crate::util::async_file(path).await?);
     let out = MemFloppyDisk::new();
 
     let mut entries = archive.entries()?;
     while let Some(mut entry) = entries.try_next().await? {
+        debug!("reading header...");
         let header = entry.header();
         let path = PathBuf::from(OsString::from_vec(header.path_bytes().as_ref().to_vec()));
         debug!("processing archive path {}", path.display());
 
-        if let Some(parent) = path.parent() {
-            out.create_dir_all(parent).await?;
-        }
-        let mut handle = MemOpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&out, &path)
-            .await?;
+        if header.entry_type().is_dir() {
+            debug!("creating: {}", path.display());
+            out.create_dir_all(&path).await?;
 
-        let mut data = vec![];
-        entry.read_to_end(&mut data).await?;
-        tokio::io::copy(&mut data.as_slice(), &mut handle).await?;
-        debug!("copied path!");
+            out.chown(&path, header.uid()? as u32, header.gid()? as u32)
+                .await?;
+            out.set_permissions(&path, MemPermissions::from_mode(header.mode()?))
+                .await?;
+        } else if header.entry_type().is_file() {
+            if let Some(parent) = path.parent() {
+                debug!("creating parent(s): {}", parent.display());
+                out.create_dir_all(parent).await?;
+            }
+            debug!("open: {}", path.display());
+            let mut handle = MemOpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&out, &path)
+                .await?;
+
+            out.chown(&path, header.uid()? as u32, header.gid()? as u32)
+                .await?;
+            out.set_permissions(&path, MemPermissions::from_mode(header.mode()?))
+                .await?;
+
+            debug!("read archive entry");
+            let mut data = vec![];
+            entry.read_to_end(&mut data).await?;
+            tokio::io::copy(&mut data.as_slice(), &mut handle).await?;
+        } else if header.entry_type().is_symlink() {
+            out.create_dir_all("/").await?;
+            let to = PathBuf::from(OsString::from_vec(
+                header.link_name_bytes().as_ref().unwrap().to_vec(),
+            ));
+            debug!("read symlink: {} -> {}", path.display(), to.display());
+            out.symlink(to, path).await?;
+        }
     }
+
+    debug!("done reading entries!");
 
     Ok(out)
 }
@@ -48,25 +84,73 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
 
     let paths = nyoom::walk(disk, Path::new("/")).await?;
     for path in paths {
-        debug!("processing archive path {}", path.display());
-        let metadata = disk.metadata(&path).await?;
-        if metadata.is_file() {
-            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+        debug!("processing output archive path {}", path.display());
+        let mut header = tokio_tar_up2date::Header::new_ustar();
+        header.set_path(path.strip_prefix("/").unwrap())?;
 
-            let mut data = vec![];
-            handle.read_to_end(&mut data).await?;
+        let kind = determine_file_type(disk, &path).await?;
+        if kind == EntryType::Regular {
+            debug!("creating file: {}", path.display());
+            let metadata = disk.metadata(&path).await?;
 
-            let mut header = tokio_tar_up2date::Header::new_ustar();
-            header.set_path(path.strip_prefix("/").unwrap())?;
-            header.set_size(data.len() as u64);
+            header.set_entry_type(EntryType::Regular);
+            header.set_size(metadata.len());
+            header.set_mode(metadata.permissions().mode());
             header.set_gid(metadata.gid()?.into());
             header.set_uid(metadata.uid()?.into());
-            header.set_mode(metadata.permissions().mode());
+
+            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+
             header.set_cksum();
 
-            archive.append(&header, &mut data.as_slice()).await?;
+            archive.append(&header, &mut handle).await?;
+        } else if kind == EntryType::Directory {
+            debug!("creating dir: {}", path.display());
+            let metadata = disk.metadata(&path).await?;
+
+            header.set_entry_type(EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(metadata.permissions().mode());
+            header.set_gid(metadata.gid()?.into());
+            header.set_uid(metadata.uid()?.into());
+
+            header.set_cksum();
+            let empty: &[u8] = &[];
+            archive.append(&header, empty).await?;
+        } else if kind == EntryType::Symlink {
+            let link = disk.read_link(&path).await?;
+            warn!("creating symlink: {} -> {}", path.display(), link.display());
+
+            header.set_entry_type(EntryType::Symlink);
+            header.set_link_name(link.to_str().unwrap())?;
+            header.set_size(0);
+            header.set_cksum();
+
+            let empty: &[u8] = &[];
+            archive.append(&header, empty).await?;
         }
     }
 
+    archive.finish().await?;
+
     Ok(())
+}
+
+async fn determine_file_type(disk: &MemFloppyDisk, path: &Path) -> Result<EntryType> {
+    match disk.read_link(path).await {
+        Ok(_) => Ok(EntryType::Symlink),
+        Err(_) => {
+            let file_type = disk.metadata(path).await?.file_type();
+            if file_type.is_symlink() {
+                Ok(EntryType::Symlink)
+            } else if file_type.is_dir() {
+                Ok(EntryType::Directory)
+            } else if file_type.is_file() {
+                Ok(EntryType::Regular)
+            } else {
+                warn!("unknown file type for: {}", path.display());
+                Ok(EntryType::Regular)
+            }
+        }
+    }
 }

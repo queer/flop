@@ -7,6 +7,11 @@ crate::util::archive_format!(Ar, "a.ar", ar_open, ar_close);
 
 async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
+    if !crate::util::exists_async(path.clone()).await {
+        let _archive = ar::Archive::new(std::fs::File::create(path)?);
+        return Ok(MemFloppyDisk::new());
+    }
+
     debug!("opening ar file {}", path.display());
     let mut archive = ar::Archive::new(crate::util::sync_file(path)?);
     let out = MemFloppyDisk::new();

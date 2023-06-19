@@ -8,6 +8,10 @@ crate::util::archive_format!(Cpio, "a.cpio", cpio_open, cpio_close);
 
 async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     let path = path.into();
+    if !crate::util::exists_async(path.clone()).await {
+        return Ok(MemFloppyDisk::new());
+    }
+
     debug!("loading cpio archive from {}...", path.display());
     let mut file = crate::util::async_file(path).await?;
     let out = MemFloppyDisk::new();

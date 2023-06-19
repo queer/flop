@@ -20,17 +20,35 @@ macro_rules! archive_format {
             impl [< $format FloppyDisk >] {
                 pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<[< $format FloppyDisk >]> {
                     let path = path.as_ref();
-                    $open(path).await.map(|delegate| Self { delegate, path: path.to_path_buf() })
+                    $open(path).await.map(|delegate| Self { delegate, path: path.to_path_buf(), })
+                }
+
+                pub async fn close(self) -> Result<()> {
+                    $close(&self.delegate, &self.path).await
                 }
             }
 
-            impl Drop for [< $format FloppyDisk >] {
-                fn drop(&mut self) {
-                    crate::util::run_here(async {
-                        $close(&self.delegate, &self.path).await.unwrap();
-                    })
-                }
-            }
+            // impl Drop for [< $format FloppyDisk >] {
+            //     fn drop(&mut self) {
+            //         if self.did_drop {
+            //             return;
+            //         }
+            //         self.did_drop = true;
+
+            //         let mut this = [< $format FloppyDisk >] {
+            //             delegate: MemFloppyDisk::new(),
+            //             path: self.path.clone(),
+            //             // Guard against recursively dropping forever
+            //             did_drop: true,
+            //         };
+
+            //         std::mem::swap(self, &mut this);
+
+            //         baka::spawn(async move {
+            //             $close(&this.delegate, &this.path).await.unwrap();
+            //         });
+            //     }
+            // }
 
             #[async_trait::async_trait]
             impl<'a> FloppyDisk<'a> for [< $format FloppyDisk >] {
@@ -542,16 +560,24 @@ macro_rules! archive_format {
     };
 }
 
+use std::path::{Path, PathBuf};
+
+pub(crate) use archive_format;
+use tracing::debug;
+
+pub(crate) async fn exists_async<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+    tokio::fs::canonicalize(path).await.is_ok()
+}
+
 pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
     let path = path.as_ref().canonicalize()?;
-    let file = if path.exists() {
-        std::fs::OpenOptions::new().write(true).open(path)?
-    } else {
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)?
-    };
+    debug!("open file sync: {}", path.display());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
     file.sync_all()?;
     Ok(file)
 }
@@ -559,27 +585,16 @@ pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::Fil
 pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio::fs::File> {
     let path = path.as_ref();
     let path = tokio::fs::canonicalize(path).await?;
-    let file = if tokio::fs::try_exists(&path).await? {
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .await?
-    } else {
-        tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .await?
-    };
+    debug!("open file async: {}", path.display());
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .await?;
     file.sync_all().await?;
     Ok(file)
 }
-
-use std::future::Future;
-use std::path::{Path, PathBuf};
-
-pub(crate) use archive_format;
-use tracing::debug;
 
 pub(crate) struct TempDir {
     path: PathBuf,
@@ -628,24 +643,6 @@ impl std::ops::Deref for TempDir {
     fn deref(&self) -> &Self::Target {
         &self.path
     }
-}
-
-pub(crate) fn run_here<F: Future>(fut: F) -> F::Output {
-    // TODO: This is evil
-    // Adapted from https://stackoverflow.com/questions/66035290
-    let handle = tokio::runtime::Handle::try_current().unwrap();
-    let _guard = handle.enter();
-    futures::executor::block_on(fut)
-}
-
-#[allow(unused)]
-pub(crate) fn run_here_outside_of_tokio_context<F: Future>(fut: F) -> F::Output {
-    // TODO: This is slightly less-evil than the previous one but still pretty bad
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    rt.block_on(fut)
 }
 
 #[cfg(test)]
