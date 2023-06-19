@@ -18,7 +18,7 @@ macro_rules! archive_format {
             }
 
             impl [< $format FloppyDisk >] {
-                pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<impl FloppyDisk<'a> + FloppyDiskUnixExt> {
+                pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<[< $format FloppyDisk >]> {
                     let path = path.as_ref();
                     $open(path).await.map(|delegate| Self { delegate, path: path.to_path_buf() })
                 }

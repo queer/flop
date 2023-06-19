@@ -1,6 +1,6 @@
 [package]
 name = "flop"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "floppy-disk facades for common archive formats!"
