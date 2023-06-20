@@ -86,7 +86,7 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
         .await?;
     let mut archive = tokio_tar_up2date::Builder::new(buffer);
 
-    let paths = nyoom::walk(disk, Path::new("/")).await?;
+    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
     for path in paths {
         debug!("processing output archive path {}", path.display());
         let mut header = tokio_tar_up2date::Header::new_ustar();

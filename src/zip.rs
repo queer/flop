@@ -67,7 +67,7 @@ async fn zip_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
     let buffer = vec![];
     let mut writer = ZipFileWriter::with_tokio(buffer);
 
-    let paths = nyoom::walk(disk, Path::new("/")).await?;
+    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
     for path in paths {
         let metadata = disk.metadata(&path).await?;
         if metadata.is_file() {

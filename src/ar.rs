@@ -60,7 +60,7 @@ async fn ar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionTy
     let mut archive = ar::Builder::new(&mut buffer);
 
     debug!("walking ar paths...");
-    let paths = nyoom::walk(disk, Path::new("/")).await?;
+    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
     debug!("found {} paths!", paths.len());
     // We only need to write file paths into the ar.
     // Directories are implied by the file paths.
@@ -97,7 +97,7 @@ async fn ar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionTy
 
             // TODO: async safety
             archive.append(&header, &mut data.as_slice())?;
-            debug!("appended to archive!");
+            debug!("appended to archive: {}", path.display());
         }
     }
 

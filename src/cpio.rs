@@ -77,7 +77,7 @@ async fn cpio_close(
     debug!("closing cpio archive at {}...", scope.display());
     let buffer = Arc::new(Mutex::new(vec![]));
 
-    let paths = nyoom::walk(disk, Path::new("/")).await?;
+    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
     debug!("found {} paths!", paths.len());
     for path in paths {
         let metadata = disk.metadata(&path).await?;
