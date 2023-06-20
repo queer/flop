@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::os::unix::prelude::OsStringExt;
 
 use async_zip::tokio::read::seek::ZipFileReader;
@@ -17,7 +18,10 @@ async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     }
 
     debug!("opening zip file {}", path.display());
-    let mut archive = ZipFileReader::with_tokio(crate::util::async_file(path).await?)
+    let mut file = crate::util::async_file(path).await?;
+    let mut buffer = vec![];
+    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let mut archive = ZipFileReader::with_tokio(Cursor::new(buffer))
         .await
         .map_err(fix_err)?;
     let out = MemFloppyDisk::new();

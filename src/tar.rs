@@ -18,7 +18,10 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     }
 
     debug!("opening tar file {}", path.display());
-    let mut archive = tokio_tar_up2date::Archive::new(crate::util::async_file(path).await?);
+    let mut file = crate::util::async_file(path).await?;
+    let mut buffer = vec![];
+    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let mut archive = tokio_tar_up2date::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
 
     let mut entries = archive.entries()?;

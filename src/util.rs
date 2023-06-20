@@ -28,28 +28,6 @@ macro_rules! archive_format {
                 }
             }
 
-            // impl Drop for [< $format FloppyDisk >] {
-            //     fn drop(&mut self) {
-            //         if self.did_drop {
-            //             return;
-            //         }
-            //         self.did_drop = true;
-
-            //         let mut this = [< $format FloppyDisk >] {
-            //             delegate: MemFloppyDisk::new(),
-            //             path: self.path.clone(),
-            //             // Guard against recursively dropping forever
-            //             did_drop: true,
-            //         };
-
-            //         std::mem::swap(self, &mut this);
-
-            //         baka::spawn(async move {
-            //             $close(&this.delegate, &this.path).await.unwrap();
-            //         });
-            //     }
-            // }
-
             #[async_trait::async_trait]
             impl<'a> FloppyDisk<'a> for [< $format FloppyDisk >] {
                 type DirBuilder = [< $format DirBuilder >]<'a>;
@@ -488,6 +466,7 @@ macro_rules! archive_format {
 
                     let input = disk.read_to_string("/a.txt").await?;
                     assert_eq!("asdf\n", input);
+                    disk.close().await?;
 
                     Ok(())
                 }
@@ -498,12 +477,14 @@ macro_rules! archive_format {
                     {
                         let disk = [< $format FloppyDisk >]::open(archive.path_view()).await?;
                         disk.write("/b.txt", "wow!!!").await?;
+                        disk.close().await?;
                     }
                     {
                         let disk = [< $format FloppyDisk >]::open(archive.path_view()).await?;
 
                         let input = disk.read_to_string("/b.txt").await?;
                         assert_eq!("wow!!!", input);
+                        disk.close().await?;
                     }
 
                     Ok(())
@@ -516,12 +497,14 @@ macro_rules! archive_format {
                         let disk = [< $format FloppyDisk >]::open(archive.path_view()).await?;
                         disk.create_dir_all("/test/thing").await?;
                         disk.write("/test/thing/heck.txt", "omg!!!").await?;
+                        disk.close().await?;
                     }
                     {
                         let disk = [< $format FloppyDisk >]::open(archive.path_view()).await?;
 
                         let input = disk.read_to_string("/test/thing/heck.txt").await?;
                         assert_eq!("omg!!!", input);
+                        disk.close().await?;
                     }
 
                     Ok(())
@@ -539,6 +522,7 @@ macro_rules! archive_format {
                         disk.write("/test/thing/heck.txt", "omg!!!").await?;
                         disk.write("/a/b/c/d/e/f/g/h.txt", "gasp!!!").await?;
                         disk.write("/1/2/3/4/5/6.txt", "wtf!!!").await?;
+                        disk.close().await?;
                     }
                     {
                         let disk = [< $format FloppyDisk >]::open(archive.path_view()).await?;
@@ -551,6 +535,7 @@ macro_rules! archive_format {
 
                         let input = disk.read_to_string("/1/2/3/4/5/6.txt").await?;
                         assert_eq!("wtf!!!", input);
+                        disk.close().await?;
                     }
 
                     Ok(())
@@ -568,18 +553,6 @@ use tracing::debug;
 pub(crate) async fn exists_async<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
     tokio::fs::canonicalize(path).await.is_ok()
-}
-
-pub(crate) fn sync_file<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
-    let path = path.as_ref().canonicalize()?;
-    debug!("open file sync: {}", path.display());
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(path)?;
-    file.sync_all()?;
-    Ok(file)
 }
 
 pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio::fs::File> {

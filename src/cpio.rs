@@ -13,14 +13,14 @@ async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
     }
 
     debug!("loading cpio archive from {}...", path.display());
-    let mut file = crate::util::async_file(path).await?;
     let out = MemFloppyDisk::new();
-    let mut data = vec![];
-    file.read_to_end(&mut data).await?;
+    let mut file = crate::util::async_file(path).await?;
+    let mut buffer = vec![];
+    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
     debug!("loaded cpio archive!");
 
     debug!("reading cpio entries...");
-    for file in cpio_reader::iter_files(&data) {
+    for file in cpio_reader::iter_files(&buffer) {
         debug!("reading next entry...");
         let file_path = if file.name().starts_with('/') {
             PathBuf::from(file.name())
