@@ -5,22 +5,23 @@ use async_zip::tokio::read::seek::ZipFileReader;
 use async_zip::tokio::write::ZipFileWriter;
 use async_zip::{ZipDateTime, ZipEntryBuilder, ZipString};
 use chrono::DateTime;
+use smoosh::CompressionType;
 use tokio::io::AsyncReadExt;
 use tracing::debug;
 
 crate::util::archive_format!(Zip, "a.zip", zip_open, zip_close);
 
-async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
+async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
         let _archive = ZipFileWriter::with_tokio(tokio::fs::File::create(path).await?);
-        return Ok(MemFloppyDisk::new());
+        return Ok((MemFloppyDisk::new(), CompressionType::None));
     }
 
     debug!("opening zip file {}", path.display());
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
-    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
     let mut archive = ZipFileReader::with_tokio(Cursor::new(buffer))
         .await
         .map_err(fix_err)?;
@@ -52,18 +53,19 @@ async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
         debug!("copied path!");
     }
 
-    Ok(out)
+    Ok((out, c))
 }
 
-async fn zip_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
+async fn zip_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
     debug!("closing zip at {}", scope.display());
-    let out = tokio::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(scope)
         .await?;
 
-    let mut writer = ZipFileWriter::with_tokio(out);
+    let buffer = vec![];
+    let mut writer = ZipFileWriter::with_tokio(buffer);
 
     let paths = nyoom::walk(disk, Path::new("/")).await?;
     for path in paths {
@@ -99,7 +101,8 @@ async fn zip_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
         }
     }
 
-    writer.close().await.map_err(fix_err)?;
+    let writer = writer.close().await.map_err(fix_err)?;
+    smoosh::recompress(&mut writer.get_ref().as_slice(), &mut file, compression).await?;
 
     Ok(())
 }

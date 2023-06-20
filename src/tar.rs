@@ -1,6 +1,7 @@
 use std::os::unix::prelude::OsStringExt;
 
 use futures::TryStreamExt;
+use smoosh::CompressionType;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio_tar_up2date::EntryType;
@@ -8,19 +9,19 @@ use tracing::{debug, warn};
 
 crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
 
-async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
+async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
     let path = path.into();
     debug!("considering {}..", path.display());
     if !crate::util::exists_async(path.clone()).await {
         debug!("nah, just empty tar: {}", path.display());
         let _archive = tokio_tar_up2date::Builder::new(File::create(path).await?);
-        return Ok(MemFloppyDisk::new());
+        return Ok((MemFloppyDisk::new(), CompressionType::None));
     }
 
     debug!("opening tar file {}", path.display());
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
-    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
     let mut archive = tokio_tar_up2date::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
 
@@ -72,18 +73,18 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
 
     debug!("done reading entries!");
 
-    Ok(out)
+    Ok((out, c))
 }
 
-async fn tar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
+async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
     debug!("closing tar at {}", scope.display());
-    let mut archive = tokio_tar_up2date::Builder::new(
-        tokio::fs::OpenOptions::new()
-            .truncate(true)
-            .write(true)
-            .open(scope)
-            .await?,
-    );
+    let buffer = vec![];
+    let mut file = tokio::fs::OpenOptions::new()
+        .truncate(true)
+        .write(true)
+        .open(scope)
+        .await?;
+    let mut archive = tokio_tar_up2date::Builder::new(buffer);
 
     let paths = nyoom::walk(disk, Path::new("/")).await?;
     for path in paths {
@@ -134,7 +135,9 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
         }
     }
 
-    archive.finish().await?;
+    let buffer = archive.into_inner().await?;
+    smoosh::recompress(&mut buffer.as_slice(), &mut file, compression).await?;
+    debug!("done writing archive!");
 
     Ok(())
 }

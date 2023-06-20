@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use smoosh::CompressionType;
 use tokio::io::AsyncReadExt;
@@ -6,17 +6,17 @@ use tracing::debug;
 
 crate::util::archive_format!(Cpio, "a.cpio", cpio_open, cpio_close);
 
-async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
+async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
-        return Ok(MemFloppyDisk::new());
+        return Ok((MemFloppyDisk::new(), CompressionType::None));
     }
 
     debug!("loading cpio archive from {}...", path.display());
     let out = MemFloppyDisk::new();
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
-    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
     debug!("loaded cpio archive!");
 
     debug!("reading cpio entries...");
@@ -65,22 +65,17 @@ async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
         debug!("loaded file!");
     }
 
-    Ok(out)
+    Ok((out, c))
 }
 
-async fn cpio_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
+async fn cpio_close(
+    disk: &MemFloppyDisk,
+    scope: &Path,
+    compression: CompressionType,
+) -> Result<()> {
     let scope_clone = scope.to_path_buf();
     debug!("closing cpio archive at {}...", scope.display());
-    let archive = tokio::task::spawn_blocking(move || {
-        Arc::new(std::sync::Mutex::new(
-            std::fs::OpenOptions::new()
-                .truncate(true)
-                .write(true)
-                .open(scope_clone)
-                .unwrap(),
-        ))
-    })
-    .await?;
+    let buffer = Arc::new(Mutex::new(vec![]));
 
     let paths = nyoom::walk(disk, Path::new("/")).await?;
     debug!("found {} paths!", paths.len());
@@ -93,7 +88,7 @@ async fn cpio_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
             let mut data = vec![];
             handle.read_to_end(&mut data).await?;
 
-            let archive = archive.clone();
+            let archive = buffer.clone();
             tokio::task::spawn_blocking(move || {
                 let mut archive = archive.lock().unwrap();
                 let mut writer = writer
@@ -110,6 +105,20 @@ async fn cpio_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
             debug!("wrote file: {}", path.display());
         }
     }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(scope_clone)
+        .await?;
+    // TODO: Is there a better way to pull this data out?
+    let buffer = tokio::task::spawn_blocking(move || {
+        let data = buffer.lock().unwrap();
+        data.clone()
+    })
+    .await?;
+    smoosh::recompress(&mut buffer.as_slice(), &mut file, compression).await?;
+    debug!("wrote cpio archive!");
 
     Ok(())
 }

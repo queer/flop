@@ -1,23 +1,24 @@
 use std::io::Read;
 use std::os::unix::prelude::{OsStrExt, OsStringExt};
 
+use smoosh::CompressionType;
 use tracing::debug;
 
 crate::util::archive_format!(Ar, "a.ar", ar_open, ar_close);
 
-async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
+async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
         debug!("creating empty ar!");
         let _archive = ar::Archive::new(std::fs::File::create(path)?);
-        return Ok(MemFloppyDisk::new());
+        return Ok((MemFloppyDisk::new(), CompressionType::None));
     }
 
     debug!("opening ar file {}", path.display());
 
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
-    smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
+    let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
 
     let mut archive = ar::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
@@ -45,16 +46,18 @@ async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<MemFloppyDisk> {
 
     debug!("finished opening ar!");
 
-    Ok(out)
+    Ok((out, c))
 }
 
-async fn ar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
+async fn ar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
     debug!("closing ar at {}", scope.display());
-    let file = std::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .truncate(true) // TODO: Validate this is actually desired...
-        .open(scope)?;
-    let mut archive = ar::Builder::new(file);
+        .open(scope)
+        .await?;
+    let mut buffer = vec![];
+    let mut archive = ar::Builder::new(&mut buffer);
 
     debug!("walking ar paths...");
     let paths = nyoom::walk(disk, Path::new("/")).await?;
@@ -98,6 +101,8 @@ async fn ar_close(disk: &MemFloppyDisk, scope: &Path) -> Result<()> {
         }
     }
 
+    smoosh::recompress(&mut buffer.as_slice(), &mut file, compression).await?;
     debug!("finished closing ar!");
+
     Ok(())
 }

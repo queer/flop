@@ -14,17 +14,18 @@ macro_rules! archive_format {
             #[derive(Debug)]
             pub struct [< $format FloppyDisk >] {
                 delegate: MemFloppyDisk,
+                compression: smoosh::CompressionType,
                 path: PathBuf,
             }
 
             impl [< $format FloppyDisk >] {
                 pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<[< $format FloppyDisk >]> {
                     let path = path.as_ref();
-                    $open(path).await.map(|delegate| Self { delegate, path: path.to_path_buf(), })
+                    $open(path).await.map(|(delegate, compression)| Self { delegate, compression, path: path.to_path_buf(), })
                 }
 
                 pub async fn close(self) -> Result<()> {
-                    $close(&self.delegate, &self.path).await
+                    $close(&self.delegate, &self.path, self.compression).await
                 }
             }
 
