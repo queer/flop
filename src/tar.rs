@@ -73,6 +73,19 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
                 header.link_name_bytes().as_ref().unwrap().to_vec(),
             ));
             debug!("read symlink: {} -> {}", path.display(), to.display());
+            let path = if !path.starts_with("/") {
+                PathBuf::from("/").join(path)
+            } else {
+                path
+            };
+            if let Some(parent) = to.parent() {
+                debug!("creating parent(s): {}", parent.display());
+                out.create_dir_all(parent).await?;
+            }
+            if let Some(parent) = path.parent() {
+                debug!("creating parent(s): {}", parent.display());
+                out.create_dir_all(parent).await?;
+            }
             out.symlink(to, path).await?;
         }
     }
