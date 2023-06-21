@@ -6,12 +6,16 @@ use tracing::debug;
 
 crate::util::archive_format!(Ar, "a.ar", ar_open, ar_close);
 
-async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
+async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<ArInternalMetadata> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
         debug!("creating empty ar!");
         let _archive = ar::Archive::new(std::fs::File::create(path)?);
-        return Ok((MemFloppyDisk::new(), CompressionType::None));
+        return Ok(ArInternalMetadata {
+            delegate: MemFloppyDisk::new(),
+            compression: CompressionType::None,
+            ordered_paths: IndexSet::new(),
+        });
     }
 
     debug!("opening ar file {}", path.display());
@@ -22,11 +26,18 @@ async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressio
 
     let mut archive = ar::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
+    let mut ordered_paths = IndexSet::new();
 
     while let Some(entry) = archive.next_entry() {
         let mut entry = entry?;
         let header = entry.header();
         let path = PathBuf::from(OsString::from_vec(header.identifier().to_vec()));
+        let path = if !path.starts_with("/") {
+            PathBuf::from("/").join(path)
+        } else {
+            path
+        };
+        ordered_paths.insert(path.clone());
         debug!("processing archive path {}", path.display());
 
         if let Some(parent) = path.parent() {
@@ -46,10 +57,19 @@ async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressio
 
     debug!("finished opening ar!");
 
-    Ok((out, c))
+    Ok(ArInternalMetadata {
+        delegate: out,
+        compression: c,
+        ordered_paths,
+    })
 }
 
-async fn ar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
+async fn ar_close(
+    disk: &MemFloppyDisk,
+    scope: &Path,
+    compression: CompressionType,
+    ordered_paths: &IndexSet<PathBuf>,
+) -> Result<()> {
     debug!("closing ar at {}", scope.display());
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -60,16 +80,15 @@ async fn ar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionTy
     let mut archive = ar::Builder::new(&mut buffer);
 
     debug!("walking ar paths...");
-    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
-    debug!("found {} paths!", paths.len());
+    debug!("found {} paths!", ordered_paths.len());
     // We only need to write file paths into the ar.
     // Directories are implied by the file paths.
-    for path in paths {
+    for path in ordered_paths {
         debug!("processing archive path {}", path.display());
-        let metadata = disk.metadata(&path).await?;
+        let metadata = disk.metadata(path).await?;
         if metadata.is_file() {
             debug!("reading from memfs...");
-            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+            let mut handle = MemOpenOptions::new().read(true).open(disk, path).await?;
 
             let mut data = vec![];
             tokio::io::AsyncReadExt::read_to_end(&mut handle, &mut data).await?;

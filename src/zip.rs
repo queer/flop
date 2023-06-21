@@ -11,11 +11,15 @@ use tracing::debug;
 
 crate::util::archive_format!(Zip, "a.zip", zip_open, zip_close);
 
-async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
+async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<ZipInternalMetadata> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
         let _archive = ZipFileWriter::with_tokio(tokio::fs::File::create(path).await?);
-        return Ok((MemFloppyDisk::new(), CompressionType::None));
+        return Ok(ZipInternalMetadata {
+            delegate: MemFloppyDisk::new(),
+            compression: CompressionType::None,
+            ordered_paths: IndexSet::new(),
+        });
     }
 
     debug!("opening zip file {}", path.display());
@@ -26,6 +30,7 @@ async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
         .await
         .map_err(fix_err)?;
     let out = MemFloppyDisk::new();
+    let mut ordered_paths = IndexSet::new();
 
     let archive_file = archive.file();
     let entries = archive_file.entries();
@@ -34,6 +39,7 @@ async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
         let entry = zip_entry.entry();
         let path = PathBuf::from(OsString::from_vec(entry.filename().as_bytes().to_vec()));
         debug!("processing archive path {}", path.display());
+        ordered_paths.insert(path.clone());
 
         if let Some(parent) = path.parent() {
             out.create_dir_all(parent).await?;
@@ -53,10 +59,19 @@ async fn zip_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
         debug!("copied path!");
     }
 
-    Ok((out, c))
+    Ok(ZipInternalMetadata {
+        delegate: out,
+        compression: c,
+        ordered_paths,
+    })
 }
 
-async fn zip_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
+async fn zip_close(
+    disk: &MemFloppyDisk,
+    scope: &Path,
+    compression: CompressionType,
+    ordered_paths: &IndexSet<PathBuf>,
+) -> Result<()> {
     debug!("closing zip at {}", scope.display());
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -67,12 +82,11 @@ async fn zip_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
     let buffer = vec![];
     let mut writer = ZipFileWriter::with_tokio(buffer);
 
-    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
-    for path in paths {
-        let metadata = disk.metadata(&path).await?;
+    for path in ordered_paths {
+        let metadata = disk.metadata(path).await?;
         if metadata.is_file() {
             debug!("writing path {} to zip!", path.display());
-            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+            let mut handle = MemOpenOptions::new().read(true).open(disk, path).await?;
 
             let mut data = vec![];
             handle.read_to_end(&mut data).await?;

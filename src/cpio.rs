@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use smoosh::CompressionType;
 use tokio::io::AsyncReadExt;
@@ -6,14 +6,19 @@ use tracing::debug;
 
 crate::util::archive_format!(Cpio, "a.cpio", cpio_open, cpio_close);
 
-async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
+async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<CpioInternalMetadata> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
-        return Ok((MemFloppyDisk::new(), CompressionType::None));
+        return Ok(CpioInternalMetadata {
+            delegate: MemFloppyDisk::new(),
+            compression: CompressionType::None,
+            ordered_paths: IndexSet::new(),
+        });
     }
 
     debug!("loading cpio archive from {}...", path.display());
     let out = MemFloppyDisk::new();
+    let mut ordered_paths = IndexSet::new();
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
     let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
@@ -27,6 +32,7 @@ async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compress
         } else {
             PathBuf::from("/").join(file.name())
         };
+        ordered_paths.insert(file_path.clone());
 
         if let Some(parent) = file_path.parent() {
             out.create_dir_all(parent).await?;
@@ -65,25 +71,29 @@ async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compress
         debug!("loaded file!");
     }
 
-    Ok((out, c))
+    Ok(CpioInternalMetadata {
+        delegate: out,
+        compression: c,
+        ordered_paths,
+    })
 }
 
 async fn cpio_close(
     disk: &MemFloppyDisk,
     scope: &Path,
     compression: CompressionType,
+    ordered_paths: &IndexSet<PathBuf>,
 ) -> Result<()> {
     let scope_clone = scope.to_path_buf();
     debug!("closing cpio archive at {}...", scope.display());
-    let buffer = Arc::new(Mutex::new(vec![]));
+    let buffer = Arc::new(std::sync::Mutex::new(vec![]));
 
-    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
-    debug!("found {} paths!", paths.len());
-    for path in paths {
-        let metadata = disk.metadata(&path).await?;
+    debug!("found {} paths!", ordered_paths.len());
+    for path in ordered_paths {
+        let metadata = disk.metadata(path).await?;
         if metadata.is_file() {
             let writer = cpio::newc::Builder::new(&path.to_string_lossy());
-            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+            let mut handle = MemOpenOptions::new().read(true).open(disk, path).await?;
 
             let mut data = vec![];
             handle.read_to_end(&mut data).await?;

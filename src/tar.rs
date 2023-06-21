@@ -9,13 +9,17 @@ use tracing::{debug, warn};
 
 crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
 
-async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, CompressionType)> {
+async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
     let path = path.into();
     debug!("considering {}..", path.display());
     if !crate::util::exists_async(path.clone()).await {
         debug!("nah, just empty tar: {}", path.display());
         let _archive = tokio_tar_up2date::Builder::new(File::create(path).await?);
-        return Ok((MemFloppyDisk::new(), CompressionType::None));
+        return Ok(TarInternalMetadata {
+            delegate: MemFloppyDisk::new(),
+            compression: CompressionType::None,
+            ordered_paths: IndexSet::new(),
+        });
     }
 
     debug!("opening tar file {}", path.display());
@@ -24,6 +28,8 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
     let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
     let mut archive = tokio_tar_up2date::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
+    let mut ordered_paths = IndexSet::new();
+    out.create_dir_all("/").await?;
 
     let mut entries = archive.entries()?;
     while let Some(mut entry) = entries.try_next().await? {
@@ -31,6 +37,7 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
         let header = entry.header();
         let path = PathBuf::from(OsString::from_vec(header.path_bytes().as_ref().to_vec()));
         debug!("processing archive path {}", path.display());
+        ordered_paths.insert(path.clone());
 
         if header.entry_type().is_dir() {
             debug!("creating: {}", path.display());
@@ -62,7 +69,6 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
             entry.read_to_end(&mut data).await?;
             tokio::io::copy(&mut data.as_slice(), &mut handle).await?;
         } else if header.entry_type().is_symlink() {
-            out.create_dir_all("/").await?;
             let to = PathBuf::from(OsString::from_vec(
                 header.link_name_bytes().as_ref().unwrap().to_vec(),
             ));
@@ -73,10 +79,19 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<(MemFloppyDisk, Compressi
 
     debug!("done reading entries!");
 
-    Ok((out, c))
+    Ok(TarInternalMetadata {
+        delegate: out,
+        compression: c,
+        ordered_paths,
+    })
 }
 
-async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionType) -> Result<()> {
+async fn tar_close(
+    disk: &MemFloppyDisk,
+    scope: &Path,
+    compression: CompressionType,
+    ordered_paths: &IndexSet<PathBuf>,
+) -> Result<()> {
     debug!("closing tar at {}", scope.display());
     let buffer = vec![];
     let mut file = tokio::fs::OpenOptions::new()
@@ -86,16 +101,27 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
         .await?;
     let mut archive = tokio_tar_up2date::Builder::new(buffer);
 
-    let paths = nyoom::walk_ordered(disk, Path::new("/")).await?;
-    for path in paths {
+    for path in ordered_paths {
         debug!("processing output archive path {}", path.display());
-        let mut header = tokio_tar_up2date::Header::new_ustar();
-        header.set_path(path.strip_prefix("/").unwrap())?;
 
-        let kind = determine_file_type(disk, &path).await?;
+        if path.as_os_str() == "/" {
+            debug!("not writing /!");
+            continue;
+        }
+
+        let path = if path.starts_with("/") {
+            path.strip_prefix("/").unwrap()
+        } else {
+            path
+        };
+
+        let mut header = tokio_tar_up2date::Header::new_ustar();
+        header.set_path(path)?;
+
+        let kind = determine_file_type(disk, path).await?;
         if kind == EntryType::Regular {
             debug!("creating file: {}", path.display());
-            let metadata = disk.metadata(&path).await?;
+            let metadata = disk.metadata(path).await?;
 
             header.set_entry_type(EntryType::Regular);
             header.set_size(metadata.len());
@@ -103,14 +129,14 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
             header.set_gid(metadata.gid()?.into());
             header.set_uid(metadata.uid()?.into());
 
-            let mut handle = MemOpenOptions::new().read(true).open(disk, &path).await?;
+            let mut handle = MemOpenOptions::new().read(true).open(disk, path).await?;
 
             header.set_cksum();
 
             archive.append(&header, &mut handle).await?;
         } else if kind == EntryType::Directory {
             debug!("creating dir: {}", path.display());
-            let metadata = disk.metadata(&path).await?;
+            let metadata = disk.metadata(path).await?;
 
             header.set_entry_type(EntryType::Directory);
             header.set_size(0);
@@ -122,7 +148,7 @@ async fn tar_close(disk: &MemFloppyDisk, scope: &Path, compression: CompressionT
             let empty: &[u8] = &[];
             archive.append(&header, empty).await?;
         } else if kind == EntryType::Symlink {
-            let link = disk.read_link(&path).await?;
+            let link = disk.read_link(path).await?;
             debug!("creating symlink: {} -> {}", path.display(), link.display());
 
             header.set_entry_type(EntryType::Symlink);

@@ -8,24 +8,40 @@ macro_rules! archive_format {
 
             use floppy_disk::mem::*;
             use floppy_disk::prelude::*;
+            use indexmap::IndexSet;
             use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
             use tokio::pin;
+            use tokio::sync::Mutex;
+
+            pub(crate) struct [< $format InternalMetadata >] {
+                pub delegate: MemFloppyDisk,
+                pub compression: CompressionType,
+                pub ordered_paths: IndexSet<PathBuf>,
+            }
 
             #[derive(Debug)]
             pub struct [< $format FloppyDisk >] {
                 delegate: MemFloppyDisk,
                 compression: smoosh::CompressionType,
                 path: PathBuf,
+                ordered_paths: Mutex<IndexSet<PathBuf>>,
             }
 
             impl [< $format FloppyDisk >] {
                 pub async fn open<'a, P: AsRef<Path>>(path: P) -> Result<[< $format FloppyDisk >]> {
                     let path = path.as_ref();
-                    $open(path).await.map(|(delegate, compression)| Self { delegate, compression, path: path.to_path_buf(), })
+                    let metadata: [< $format InternalMetadata >] = $open(path).await?;
+                    Ok(Self {
+                        delegate: metadata.delegate,
+                        compression: metadata.compression,
+                        path: path.to_path_buf(),
+                        ordered_paths: Mutex::new(metadata.ordered_paths),
+                    })
                 }
 
                 pub async fn close(self) -> Result<()> {
-                    $close(&self.delegate, &self.path, self.compression).await
+                    let ordered_paths = &*self.ordered_paths.lock().await;
+                    $close(&self.delegate, &self.path, self.compression, ordered_paths).await
                 }
             }
 
@@ -45,18 +61,30 @@ macro_rules! archive_format {
                 }
 
                 async fn copy<P: AsRef<Path> + Send>(&self, from: P, to: P) -> Result<u64> {
+                    self.ordered_paths.lock().await.insert(to.as_ref().into());
                     self.delegate.copy(from, to).await
                 }
 
                 async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+                    self.ordered_paths.lock().await.insert(path.as_ref().into());
                     self.delegate.create_dir(path).await
                 }
 
                 async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+                    {
+                        let mut path = path.as_ref();
+                        let mut ordered_paths = self.ordered_paths.lock().await;
+                        while let Some(parent) = path.parent() {
+                            ordered_paths.insert(parent.into());
+                            path = parent;
+                        }
+                        ordered_paths.insert(path.into());
+                    }
                     self.delegate.create_dir_all(path).await
                 }
 
                 async fn hard_link<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
+                    self.ordered_paths.lock().await.insert(dst.as_ref().into());
                     self.delegate.hard_link(src, dst).await
                 }
 
@@ -81,18 +109,31 @@ macro_rules! archive_format {
                 }
 
                 async fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+                    self.ordered_paths.lock().await.remove(path.as_ref().into());
                     self.delegate.remove_dir(path).await
                 }
 
                 async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+                    {
+                        let mut path = path.as_ref();
+                        let mut ordered_paths = self.ordered_paths.lock().await;
+                        ordered_paths.remove(path);
+                        while let Some(parent) = path.parent() {
+                            ordered_paths.remove(parent);
+                            path = parent;
+                        }
+                    }
                     self.delegate.remove_dir_all(path).await
                 }
 
                 async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+                    self.ordered_paths.lock().await.remove(path.as_ref().into());
                     self.delegate.remove_file(path).await
                 }
 
                 async fn rename<P: AsRef<Path> + Send>(&self, from: P, to: P) -> Result<()> {
+                    self.ordered_paths.lock().await.remove(from.as_ref().into());
+                    self.ordered_paths.lock().await.insert(to.as_ref().into());
                     self.delegate.rename(from, to).await
                 }
 
@@ -105,6 +146,7 @@ macro_rules! archive_format {
                 }
 
                 async fn symlink<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
+                    self.ordered_paths.lock().await.insert(dst.as_ref().into());
                     self.delegate.symlink(src, dst).await
                 }
 
@@ -124,11 +166,16 @@ macro_rules! archive_format {
                     path: P,
                     contents: impl AsRef<[u8]> + Send,
                 ) -> Result<()> {
+                    self.ordered_paths.lock().await.insert(path.as_ref().into());
                     self.delegate.write(path, contents).await
                 }
 
                 fn new_dir_builder(&'a self) -> Self::DirBuilder {
-                    [< $format DirBuilder >](self.delegate.new_dir_builder())
+                    [< $format DirBuilder >] {
+                        delegate: self,
+                        recursive: false,
+                        mode: 0o777,
+                    }
                 }
             }
 
@@ -145,23 +192,30 @@ macro_rules! archive_format {
             }
 
             #[derive(Debug)]
-            #[repr(transparent)]
-            pub struct [< $format DirBuilder >]<'a>(#[doc(hidden)] MemDirBuilder<'a>);
+            pub struct [< $format DirBuilder >]<'a> {
+                #[doc(hidden)] delegate: &'a [< $format FloppyDisk >],
+                #[doc(hidden)] recursive: bool,
+                #[doc(hidden)] mode: u32,
+            }
 
             #[async_trait::async_trait]
             impl FloppyDirBuilder for [< $format DirBuilder >]<'_> {
                 fn recursive(&mut self, recursive: bool) -> &mut Self {
-                    self.0.recursive(recursive);
+                    self.recursive = (recursive);
                     self
                 }
 
                 async fn create<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-                    self.0.create(path).await
+                    if self.recursive {
+                        self.delegate.create_dir_all(path).await
+                    } else {
+                        self.delegate.create_dir(path).await
+                    }
                 }
 
                 #[cfg(unix)]
                 fn mode(&mut self, mode: u32) -> &mut Self {
-                    self.0.mode(mode);
+                    self.mode =(mode);
                     self
                 }
             }
@@ -372,37 +426,36 @@ macro_rules! archive_format {
             }
 
             #[derive(Debug)]
-            #[repr(transparent)]
-            pub struct [< $format OpenOptions>](#[doc(hidden)] MemOpenOptions);
+            pub struct [< $format OpenOptions>](#[doc(hidden)] MemOpenOptions, #[doc(hidden)] bool);
 
             #[async_trait::async_trait]
             impl<'a> FloppyOpenOptions<'a, [< $format FloppyDisk >]> for [< $format OpenOptions >] {
                 fn new() -> Self {
-                    Self(MemOpenOptions::new())
+                    Self(MemOpenOptions::new(), false)
                 }
 
                 fn read(self, read: bool) -> Self {
-                    Self(self.0.read(read))
+                    Self(self.0.read(read), self.1)
                 }
 
                 fn write(self, write: bool) -> Self {
-                    Self(self.0.write(write))
+                    Self(self.0.write(write), self.1)
                 }
 
                 fn append(self, append: bool) -> Self {
-                    Self(self.0.append(append))
+                    Self(self.0.append(append), self.1)
                 }
 
                 fn truncate(self, truncate: bool) -> Self {
-                    Self(self.0.truncate(truncate))
+                    Self(self.0.truncate(truncate), self.1)
                 }
 
                 fn create(self, create: bool) -> Self {
-                    Self(self.0.create(create))
+                    Self(self.0.create(create), create)
                 }
 
                 fn create_new(self, create_new: bool) -> Self {
-                    Self(self.0.create_new(create_new))
+                    Self(self.0.create_new(create_new), create_new)
                 }
 
                 async fn open<P: AsRef<Path> + Send>(
@@ -410,6 +463,9 @@ macro_rules! archive_format {
                     disk: &'a [< $format FloppyDisk >],
                     path: P,
                 ) -> Result<<[< $format FloppyDisk >] as FloppyDisk<'a>>::File> {
+                    if self.1 {
+                        disk.ordered_paths.lock().await.insert(path.as_ref().into());
+                    }
                     self.0.open(&disk.delegate, path).await.map([< $format File >])
                 }
             }
