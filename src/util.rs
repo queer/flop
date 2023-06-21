@@ -12,6 +12,7 @@ macro_rules! archive_format {
             use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
             use tokio::pin;
             use tokio::sync::Mutex;
+            use tracing::trace;
 
             pub(crate) struct [< $format InternalMetadata >] {
                 pub delegate: MemFloppyDisk,
@@ -43,6 +44,28 @@ macro_rules! archive_format {
                     let ordered_paths = &*self.ordered_paths.lock().await;
                     $close(&self.delegate, &self.path, self.compression, ordered_paths).await
                 }
+
+                pub(crate) async fn add_path<P: AsRef<Path> + Send>(&self, path: P) {
+                    let path = path.as_ref().to_path_buf();
+                    let path = if !path.starts_with("/") {
+                        PathBuf::from("/").join(path)
+                    } else {
+                        path
+                    };
+                    trace!("adding ordered path: {}", path.display());
+                    self.ordered_paths.lock().await.insert(path);
+                }
+
+                pub(crate) async fn remove_path<P: AsRef<Path> + Send>(&self, path: P) {
+                    let path = path.as_ref().to_path_buf();
+                    let path = if !path.starts_with("/") {
+                        PathBuf::from("/").join(path)
+                    } else {
+                        path
+                    };
+                    trace!("removing ordered path: {}", path.display());
+                    self.ordered_paths.lock().await.remove(&path);
+                }
             }
 
             #[async_trait::async_trait]
@@ -61,30 +84,42 @@ macro_rules! archive_format {
                 }
 
                 async fn copy<P: AsRef<Path> + Send>(&self, from: P, to: P) -> Result<u64> {
-                    self.ordered_paths.lock().await.insert(to.as_ref().into());
+                    {
+                        let to = to.as_ref();
+                        self.add_path(to).await;
+                    }
                     self.delegate.copy(from, to).await
                 }
 
                 async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-                    self.ordered_paths.lock().await.insert(path.as_ref().into());
+                    {
+                        let path = path.as_ref();
+                        self.add_path(path).await;
+                    }
                     self.delegate.create_dir(path).await
                 }
 
                 async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
                     {
                         let mut path = path.as_ref();
-                        let mut ordered_paths = self.ordered_paths.lock().await;
+                        // Since we collect the parent paths in reverse order,
+                        // we have to reverse them to ensure they end up in the
+                        // stream in the correct order.
+                        let mut parents = vec![path.to_path_buf()];
                         while let Some(parent) = path.parent() {
-                            ordered_paths.insert(parent.into());
+                            parents.push(parent.into());
                             path = parent;
                         }
-                        ordered_paths.insert(path.into());
+                        parents.reverse();
+                        for parent in parents {
+                            self.add_path(parent).await;
+                        }
                     }
                     self.delegate.create_dir_all(path).await
                 }
 
                 async fn hard_link<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
-                    self.ordered_paths.lock().await.insert(dst.as_ref().into());
+                    {let path = dst.as_ref();self.add_path(path.to_path_buf()).await;}
                     self.delegate.hard_link(src, dst).await
                 }
 
@@ -109,17 +144,15 @@ macro_rules! archive_format {
                 }
 
                 async fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-                    self.ordered_paths.lock().await.remove(path.as_ref().into());
+                    {let path = path.as_ref();self.remove_path(path.to_path_buf()).await;}
                     self.delegate.remove_dir(path).await
                 }
 
                 async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
                     {
                         let mut path = path.as_ref();
-                        let mut ordered_paths = self.ordered_paths.lock().await;
-                        ordered_paths.remove(path);
                         while let Some(parent) = path.parent() {
-                            ordered_paths.remove(parent);
+                            self.remove_path(parent).await;
                             path = parent;
                         }
                     }
@@ -127,13 +160,22 @@ macro_rules! archive_format {
                 }
 
                 async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-                    self.ordered_paths.lock().await.remove(path.as_ref().into());
+                    {
+                        let path = path.as_ref();
+                        self.remove_path(path.to_path_buf()).await;
+                    }
                     self.delegate.remove_file(path).await
                 }
 
                 async fn rename<P: AsRef<Path> + Send>(&self, from: P, to: P) -> Result<()> {
-                    self.ordered_paths.lock().await.remove(from.as_ref().into());
-                    self.ordered_paths.lock().await.insert(to.as_ref().into());
+                    {
+                        let from = from.as_ref();
+                        self.remove_path(from).await;
+                    }
+                    {
+                        let to = to.as_ref();
+                        self.add_path(to).await;
+                    }
                     self.delegate.rename(from, to).await
                 }
 
@@ -146,7 +188,10 @@ macro_rules! archive_format {
                 }
 
                 async fn symlink<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
-                    self.ordered_paths.lock().await.insert(dst.as_ref().into());
+                    {
+                        let dst = dst.as_ref();
+                        self.add_path(dst).await;
+                    }
                     self.delegate.symlink(src, dst).await
                 }
 
@@ -166,7 +211,10 @@ macro_rules! archive_format {
                     path: P,
                     contents: impl AsRef<[u8]> + Send,
                 ) -> Result<()> {
-                    self.ordered_paths.lock().await.insert(path.as_ref().into());
+                    {
+                        let path = path.as_ref();
+                        self.add_path(path).await;
+                    }
                     self.delegate.write(path, contents).await
                 }
 
@@ -462,9 +510,10 @@ macro_rules! archive_format {
                     &self,
                     disk: &'a [< $format FloppyDisk >],
                     path: P,
-                ) -> Result<<[< $format FloppyDisk >] as FloppyDisk<'a>>::File> {
+                ) -> Result<<[< $format  FloppyDisk >] as FloppyDisk<'a>>::File> {
                     if self.1 {
-                        disk.ordered_paths.lock().await.insert(path.as_ref().into());
+                        let path = path.as_ref();
+                        disk.add_path(path).await;
                     }
                     self.0.open(&disk.delegate, path).await.map([< $format File >])
                 }

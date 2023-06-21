@@ -11,7 +11,7 @@ crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
 
 async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
     let path = path.into();
-    debug!("considering {}..", path.display());
+    debug!("considering {}...", path.display());
     if !crate::util::exists_async(path.clone()).await {
         debug!("nah, just empty tar: {}", path.display());
         let _archive = tokio_tar_up2date::Builder::new(File::create(path).await?);
@@ -78,15 +78,40 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
             } else {
                 path
             };
-            if let Some(parent) = to.parent() {
-                debug!("creating parent(s): {}", parent.display());
-                out.create_dir_all(parent).await?;
-            }
+            // SAFETY: These just need to try to create. We don't actually care
+            // about any errors, since this is a memfs. The only error that
+            // might come up seems to be a spurious "file already exists" error
+            // when the parent dir is a symlink.
+            #[allow(unused_must_use)]
             if let Some(parent) = path.parent() {
                 debug!("creating parent(s): {}", parent.display());
-                out.create_dir_all(parent).await?;
+                out.create_dir_all(parent).await;
             }
+            debug!("creating the symlink!");
+            debug!(
+                "to ({}) exists: {}",
+                to.display(),
+                out.metadata(&to).await.is_ok()
+            );
+            debug!(
+                "path ({}) exists: {}",
+                path.display(),
+                out.metadata(&path).await.is_ok()
+            );
             out.symlink(to, path).await?;
+        } else if header.entry_type().is_hard_link() {
+            // If the file is a hardlink, just duplicate the file
+            // TODO: Figure out how to make hardlinks not be hellfuck misery
+            let to = PathBuf::from(OsString::from_vec(
+                header.link_name_bytes().as_ref().unwrap().to_vec(),
+            ));
+            debug!("read hardlink: {} -> {}", path.display(), to.display());
+            let path = if !path.starts_with("/") {
+                PathBuf::from("/").join(path)
+            } else {
+                path
+            };
+            out.copy(to, path).await?;
         }
     }
 
@@ -122,54 +147,72 @@ async fn tar_close(
             continue;
         }
 
-        let path = if path.starts_with("/") {
-            path.strip_prefix("/").unwrap()
-        } else {
-            path
-        };
-
         let mut header = tokio_tar_up2date::Header::new_ustar();
-        header.set_path(path)?;
-
+        trace!("ustar header!");
+        {
+            let path = if path.starts_with("/") {
+                path.strip_prefix("/").unwrap()
+            } else {
+                path
+            };
+            header.set_path(path)?;
+        }
+        let path = if !path.starts_with("/") {
+            PathBuf::from("/").join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let path = path.as_path();
         let kind = determine_file_type(disk, path).await?;
+        trace!("set path!");
+
         if kind == EntryType::Regular {
-            debug!("creating file: {}", path.display());
+            debug!("creating file: {}", path.display(),);
             let metadata = disk.metadata(path).await?;
 
+            trace!("basic metadata");
             header.set_entry_type(EntryType::Regular);
             header.set_size(metadata.len());
             header.set_mode(metadata.permissions().mode());
             header.set_gid(metadata.gid()?.into());
             header.set_uid(metadata.uid()?.into());
 
+            trace!("opening handle!");
             let mut handle = MemOpenOptions::new().read(true).open(disk, path).await?;
 
+            trace!("checksum!");
             header.set_cksum();
 
+            trace!("append!");
             archive.append(&header, &mut handle).await?;
         } else if kind == EntryType::Directory {
             debug!("creating dir: {}", path.display());
             let metadata = disk.metadata(path).await?;
 
+            trace!("basic metadata");
             header.set_entry_type(EntryType::Directory);
             header.set_size(0);
             header.set_mode(metadata.permissions().mode());
             header.set_gid(metadata.gid()?.into());
             header.set_uid(metadata.uid()?.into());
 
+            trace!("checksum");
             header.set_cksum();
             let empty: &[u8] = &[];
+            trace!("append");
             archive.append(&header, empty).await?;
         } else if kind == EntryType::Symlink {
             let link = disk.read_link(path).await?;
             debug!("creating symlink: {} -> {}", path.display(), link.display());
 
+            trace!("basic metadata");
             header.set_entry_type(EntryType::Symlink);
             header.set_link_name(link.to_str().unwrap())?;
             header.set_size(0);
             header.set_cksum();
 
             let empty: &[u8] = &[];
+            trace!("append");
             archive.append(&header, empty).await?;
         }
     }
@@ -182,19 +225,37 @@ async fn tar_close(
 }
 
 async fn determine_file_type(disk: &MemFloppyDisk, path: &Path) -> Result<EntryType> {
+    trace!("determine file type of: {}", path.display());
     match disk.read_link(path).await {
         Ok(_) => Ok(EntryType::Symlink),
-        Err(_) => {
-            let file_type = disk.metadata(path).await?.file_type();
-            if file_type.is_symlink() {
-                Ok(EntryType::Symlink)
-            } else if file_type.is_dir() {
-                Ok(EntryType::Directory)
-            } else if file_type.is_file() {
-                Ok(EntryType::Regular)
-            } else {
-                warn!("unknown file type for: {}", path.display());
-                Ok(EntryType::Regular)
+        Err(read_link_err) => {
+            trace!(
+                "missing symlink metadata for {}: {}",
+                path.display(),
+                read_link_err
+            );
+            match disk.metadata(path).await {
+                Ok(metadata) => {
+                    let file_type = metadata.file_type();
+                    if file_type.is_symlink() {
+                        Ok(EntryType::Symlink)
+                    } else if file_type.is_dir() {
+                        Ok(EntryType::Directory)
+                    } else if file_type.is_file() {
+                        Ok(EntryType::Regular)
+                    } else {
+                        warn!("SUPER unknown file type (missing metadata + unknown file type '{:?}') for: {}", file_type, path.display());
+                        Ok(EntryType::Regular)
+                    }
+                }
+                Err(metadata_err) => {
+                    warn!(
+                        "unknown file type (missing metadata) for {}: {}",
+                        path.display(),
+                        metadata_err
+                    );
+                    Ok(EntryType::Regular)
+                }
             }
         }
     }
