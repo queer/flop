@@ -668,6 +668,8 @@ pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio
     let file = tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .create(true)
+        .truncate(false)
         .open(&path)
         .await?;
     file.sync_all().await?;
