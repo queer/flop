@@ -9,6 +9,8 @@ crate::util::archive_format!(Cpio, "a.cpio", cpio_open, cpio_close);
 async fn cpio_open<P: Into<PathBuf>>(path: P) -> Result<CpioInternalMetadata> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
+        debug!("creating new cpio archive at {}...", path.display());
+        tokio::fs::File::create(&path).await?;
         return Ok(CpioInternalMetadata {
             delegate: MemFloppyDisk::new(),
             compression: CompressionType::None,

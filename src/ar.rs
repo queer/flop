@@ -9,8 +9,11 @@ crate::util::archive_format!(Ar, "a.ar", ar_open, ar_close);
 async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<ArInternalMetadata> {
     let path = path.into();
     if !crate::util::exists_async(path.clone()).await {
-        debug!("creating empty ar!");
-        let _archive = ar::Archive::new(std::fs::File::create(path)?);
+        debug!("creating empty ar {}!", path.display());
+        let file = std::fs::File::create(path)?;
+        debug!("created ar file!");
+        let _archive = ar::Archive::new(&file);
+        debug!("opened ar file!");
         return Ok(ArInternalMetadata {
             delegate: MemFloppyDisk::new(),
             compression: CompressionType::None,

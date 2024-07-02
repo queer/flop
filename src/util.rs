@@ -646,6 +646,26 @@ macro_rules! archive_format {
 
                     Ok(())
                 }
+
+                #[test_log::test(tokio::test)]
+                async fn test_create_new_works() -> Result<()> {
+                    let tmp_dir = crate::util::TempDir::new().await?;
+                    let archive = tmp_dir.path_view().join("archive.tmp");
+                    {
+                        let disk = [< $format FloppyDisk >]::open(&archive).await?;
+                        disk.write("/a.txt", "asdf\n").await?;
+                        disk.close().await?;
+                    }
+
+                    {
+                        let disk = [< $format FloppyDisk >]::open(&archive).await?;
+                        let input = disk.read_to_string("/a.txt").await?;
+                        assert_eq!("asdf\n", input);
+                        disk.close().await?;
+                    }
+
+                    Ok(())
+                }
             }
         }
     };
