@@ -16,6 +16,8 @@ async fn ar_open<P: Into<PathBuf>>(path: P) -> Result<ArInternalMetadata> {
             compression: CompressionType::None,
             ordered_paths: IndexSet::new(),
         });
+    } else {
+        debug!("ar file exists!");
     }
 
     debug!("opening ar file {}", path.display());

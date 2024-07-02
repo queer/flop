@@ -4,7 +4,7 @@ use futures::TryStreamExt;
 use smoosh::CompressionType;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio_tar_up2date::EntryType;
+use tokio_tar::EntryType;
 use tracing::{debug, warn};
 
 crate::util::archive_format!(Tar, "a.tar", tar_open, tar_close);
@@ -14,7 +14,7 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
     debug!("considering {}...", path.display());
     if !crate::util::exists_async(path.clone()).await {
         debug!("nah, just empty tar: {}", path.display());
-        let _archive = tokio_tar_up2date::Builder::new(File::create(path).await?);
+        let _archive = tokio_tar::Builder::new(File::create(path).await?);
         return Ok(TarInternalMetadata {
             delegate: MemFloppyDisk::new(),
             compression: CompressionType::None,
@@ -25,13 +25,17 @@ async fn tar_open<P: Into<PathBuf>>(path: P) -> Result<TarInternalMetadata> {
     debug!("opening tar file {}", path.display());
     let mut file = crate::util::async_file(path).await?;
     let mut buffer = vec![];
+    debug!("recompressing");
     let c = smoosh::recompress(&mut file, &mut buffer, smoosh::CompressionType::None).await?;
-    let mut archive = tokio_tar_up2date::Archive::new(buffer.as_slice());
+    debug!("copying to memdisk");
+    let mut archive = tokio_tar::Archive::new(buffer.as_slice());
     let out = MemFloppyDisk::new();
     let mut ordered_paths = IndexSet::new();
     out.create_dir_all("/").await?;
 
+    debug!("reading entries!");
     let mut entries = archive.entries()?;
+    debug!("iterating over entries now!");
     while let Some(mut entry) = entries.try_next().await? {
         debug!("reading header...");
         let header = entry.header();
@@ -137,7 +141,7 @@ async fn tar_close(
         .write(true)
         .open(scope)
         .await?;
-    let mut archive = tokio_tar_up2date::Builder::new(buffer);
+    let mut archive = tokio_tar::Builder::new(buffer);
 
     for path in ordered_paths {
         debug!("processing output archive path {}", path.display());
@@ -147,7 +151,7 @@ async fn tar_close(
             continue;
         }
 
-        let mut header = tokio_tar_up2date::Header::new_ustar();
+        let mut header = tokio_tar::Header::new_ustar();
         trace!("ustar header!");
         {
             let path = if path.starts_with("/") {

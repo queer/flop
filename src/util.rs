@@ -668,7 +668,6 @@ pub(crate) async fn async_file<P: AsRef<Path>>(path: P) -> std::io::Result<tokio
     let file = tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
         .open(&path)
         .await?;
     file.sync_all().await?;
@@ -744,11 +743,8 @@ pub(crate) mod tests {
             let file = fixture.file_name().unwrap();
             let mut path = scope.path_view().to_path_buf();
             path.push(file);
-            tokio::io::copy(
-                &mut tokio::fs::File::open(fixture).await?,
-                &mut tokio::fs::File::create(&path).await?,
-            )
-            .await?;
+            debug!("copying fixture {} to tempfile {}", fixture.display(), path.display());
+            tokio::fs::copy(&fixture, &path).await?;
 
             Ok(TempFile { scope, path })
         }
